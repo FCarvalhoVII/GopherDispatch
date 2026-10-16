@@ -1,6 +1,6 @@
-# GopherQueue
+# GopherDispatch
 
-GopherQueue is a Go backend for creating and asynchronously processing jobs. It is designed as a production-minded exercise in concurrency and distributed systems, not a CRUD application. This release implements **v0.1 — Foundation**: an HTTP API, PostgreSQL persistence, a concurrent worker pool, simulated handlers, basic HTTP safeguards, graceful shutdown, and tests.
+GopherDispatch is a Go backend for creating and asynchronously processing jobs. It is designed as a production-minded exercise in concurrency and distributed systems, not a CRUD application. This release implements **v0.1 — Foundation**: an HTTP API, PostgreSQL persistence, a concurrent worker pool, simulated handlers, basic HTTP safeguards, graceful shutdown, and tests.
 
 > Current status: v0.1. Redis, weighted scheduling, retry backoff, idempotency, metrics, and tracing are part of the target design, but are intentionally deferred to later versions to keep the evolution verifiable.
 
