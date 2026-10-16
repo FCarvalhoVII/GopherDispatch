@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: gopherqueue
+      POSTGRES_USER: gopherqueue
+      POSTGRES_PASSWORD: gopherqueue
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/000001_create_jobs.up.sql:/docker-entrypoint-initdb.d/001_create_jobs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gopherqueue -d gopherqueue"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      args: { TARGET: api }
+    environment: &app-env
+      DATABASE_URL: postgres://gopherqueue:gopherqueue@postgres:5432/gopherqueue?sslmode=disable
+      HTTP_PORT: "8080"
+      WORKER_COUNT: "4"
+      MAX_JOB_ATTEMPTS: "3"
+      JOB_TIMEOUT: 30s
+      SHUTDOWN_TIMEOUT: 15s
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      args: { TARGET: worker }
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
