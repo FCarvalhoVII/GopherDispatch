@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/felip/gopherqueue/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
 )
 
 func TestCreateClaimComplete(t *testing.T) {

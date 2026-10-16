@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/felip/gopherqueue/internal/config"
-	"github.com/felip/gopherqueue/internal/storage/postgres"
-	workerpkg "github.com/felip/gopherqueue/internal/worker"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/config"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/storage/postgres"
+	workerpkg "github.com/FCarvalhoVII/GopherDispatch/internal/worker"
 )
 
 func main() {

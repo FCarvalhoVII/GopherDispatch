@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/felip/gopherqueue/internal/config"
-	"github.com/felip/gopherqueue/internal/httpapi"
-	"github.com/felip/gopherqueue/internal/job"
-	"github.com/felip/gopherqueue/internal/storage/postgres"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/config"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/httpapi"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/storage/postgres"
 )
 
 func main() {

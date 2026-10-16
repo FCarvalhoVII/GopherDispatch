@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/felip/gopherqueue/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
 )
 
 type recordingRepo struct {

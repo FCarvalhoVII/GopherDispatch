@@ -1,4 +1,4 @@
-module github.com/felip/gopherqueue
+module github.com/FCarvalhoVII/GopherDispatch
 
 go 1.27.0
 

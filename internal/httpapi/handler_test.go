@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/felip/gopherqueue/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
 )
 
 type fakeRepo struct{ created job.Job }

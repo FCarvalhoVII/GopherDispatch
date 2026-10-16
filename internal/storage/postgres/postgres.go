@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/felip/gopherqueue/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

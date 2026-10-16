@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/felip/gopherqueue/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
 )
 
 type Handler interface {
