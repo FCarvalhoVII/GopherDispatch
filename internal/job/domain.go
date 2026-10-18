@@ -40,7 +40,11 @@ type Job struct {
 	CompletedAt *time.Time      `json:"completedAt,omitempty"`
 }
 
-var ErrNotFound = errors.New("job not found")
+var (
+	ErrNotFound          = errors.New("job not found")
+	ErrAlreadyProcessing = errors.New("job is already processing")
+	ErrTerminal          = errors.New("job is already in a terminal state")
+)
 
 type CreateInput struct {
 	Type        string

@@ -13,6 +13,8 @@ import (
 	"github.com/FCarvalhoVII/GopherDispatch/internal/config"
 	"github.com/FCarvalhoVII/GopherDispatch/internal/httpapi"
 	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/outbox"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/queue"
 	"github.com/FCarvalhoVII/GopherDispatch/internal/storage/postgres"
 )
 
@@ -31,6 +33,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	redisQueue, err := queue.Open(ctx, cfg.RedisURL, cfg.RedisConsumerGroup)
+	if err != nil {
+		log.Error("open Redis", "error", err)
+		os.Exit(1)
+	}
+	defer redisQueue.Close()
+	go outbox.NewPublisher(store, redisQueue, cfg.OutboxPollInterval, cfg.OutboxBatchSize, log).Run(ctx)
 	service := job.NewService(store, cfg.MaxJobAttempts)
 	h := httpapi.NewHandler(service, func(r *http.Request) error {
 		c, cancel := context.WithTimeout(r.Context(), time.Second)

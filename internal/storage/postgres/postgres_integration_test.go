@@ -26,7 +26,7 @@ func TestCreateClaimComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := store.ClaimNext(ctx)
+	claimed, err := store.Claim(ctx, j.ID, "integration-test")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/FCarvalhoVII/GopherDispatch/internal/job"
+	"github.com/FCarvalhoVII/GopherDispatch/internal/outbox"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -44,22 +46,44 @@ func scanJob(row pgx.Row) (job.Job, error) {
 }
 
 func (s *Store) Create(ctx context.Context, in job.CreateInput) (job.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return job.Job{}, fmt.Errorf("begin create transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
 	q := `INSERT INTO jobs (type, payload, priority, max_attempts) VALUES ($1,$2,$3,$4) RETURNING ` + columns
-	return scanJob(s.pool.QueryRow(ctx, q, in.Type, in.Payload, in.Priority, in.MaxAttempts))
+	j, err := scanJob(tx.QueryRow(ctx, q, in.Type, in.Payload, in.Priority, in.MaxAttempts))
+	if err != nil {
+		return job.Job{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO job_outbox (job_id, priority) VALUES ($1, $2)`, j.ID, j.Priority); err != nil {
+		return job.Job{}, fmt.Errorf("insert outbox event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return job.Job{}, fmt.Errorf("commit create transaction: %w", err)
+	}
+	return j, nil
 }
 
 func (s *Store) Get(ctx context.Context, id string) (job.Job, error) {
 	return scanJob(s.pool.QueryRow(ctx, `SELECT `+columns+` FROM jobs WHERE id::text=$1`, id))
 }
 
-func (s *Store) ClaimNext(ctx context.Context) (job.Job, error) {
-	q := `WITH candidate AS (
-		SELECT id FROM jobs WHERE status='pending'
-		ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at
-		FOR UPDATE SKIP LOCKED LIMIT 1
-	) UPDATE jobs SET status='processing', attempts=attempts+1, started_at=now(), updated_at=now()
-	WHERE id=(SELECT id FROM candidate) RETURNING ` + columns
-	return scanJob(s.pool.QueryRow(ctx, q))
+func (s *Store) Claim(ctx context.Context, id, owner string) (job.Job, error) {
+	q := `UPDATE jobs SET status='processing', attempts=attempts+1, started_at=now(), claimed_at=now(), processing_owner=$2, updated_at=now()
+		WHERE id::text=$1 AND status='pending' RETURNING ` + columns
+	j, err := scanJob(s.pool.QueryRow(ctx, q, id, owner))
+	if !errors.Is(err, job.ErrNotFound) {
+		return j, err
+	}
+	current, getErr := s.Get(ctx, id)
+	if getErr != nil {
+		return job.Job{}, getErr
+	}
+	if current.Status == job.StatusProcessing {
+		return current, job.ErrAlreadyProcessing
+	}
+	return current, job.ErrTerminal
 }
 
 func (s *Store) Complete(ctx context.Context, id string) error {
@@ -69,5 +93,42 @@ func (s *Store) Complete(ctx context.Context, id string) error {
 
 func (s *Store) Fail(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE jobs SET status='failed', updated_at=now() WHERE id::text=$1 AND status='processing'`, id)
+	return err
+}
+
+func (s *Store) ClaimOutbox(ctx context.Context, limit int, staleAfter time.Duration) ([]outbox.Event, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin outbox claim: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `WITH candidates AS (
+		SELECT id FROM job_outbox WHERE published_at IS NULL AND (locked_at IS NULL OR locked_at < now() - $2::interval)
+		ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1
+	) UPDATE job_outbox SET locked_at=now() WHERE id IN (SELECT id FROM candidates)
+	RETURNING id::text, job_id::text, priority`, limit, staleAfter.String())
+	if err != nil {
+		return nil, fmt.Errorf("claim outbox events: %w", err)
+	}
+	defer rows.Close()
+	events := make([]outbox.Event, 0, limit)
+	for rows.Next() {
+		var event outbox.Event
+		if err := rows.Scan(&event.ID, &event.JobID, &event.Priority); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit outbox claim: %w", err)
+	}
+	return events, nil
+}
+
+func (s *Store) MarkOutboxPublished(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE job_outbox SET published_at=now(), locked_at=NULL WHERE id::text=$1 AND published_at IS NULL`, id)
 	return err
 }

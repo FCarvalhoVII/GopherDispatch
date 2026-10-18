@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS job_outbox;
+ALTER TABLE jobs DROP COLUMN IF EXISTS claimed_at;
+ALTER TABLE jobs DROP COLUMN IF EXISTS processing_owner;

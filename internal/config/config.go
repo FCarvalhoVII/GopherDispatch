@@ -9,20 +9,30 @@ import (
 )
 
 type Config struct {
-	HTTPPort           string
-	DatabaseURL        string
-	WorkerCount        int
-	WorkerPollInterval time.Duration
-	MaxJobAttempts     int
-	JobTimeout         time.Duration
-	ShutdownTimeout    time.Duration
-	RequestBodyLimit   int64
-	RateLimitPerMinute int
+	HTTPPort             string
+	DatabaseURL          string
+	RedisURL             string
+	RedisConsumerGroup   string
+	WorkerCount          int
+	WorkerPollInterval   time.Duration
+	OutboxPollInterval   time.Duration
+	OutboxBatchSize      int
+	PendingIdleTimeout   time.Duration
+	PriorityHighWeight   int
+	PriorityMediumWeight int
+	PriorityLowWeight    int
+	MaxJobAttempts       int
+	JobTimeout           time.Duration
+	ShutdownTimeout      time.Duration
+	RequestBodyLimit     int64
+	RateLimitPerMinute   int
 }
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPPort: "8080", WorkerCount: 4, WorkerPollInterval: 500 * time.Millisecond,
+		HTTPPort: "8080", RedisURL: "redis://localhost:6379/0", RedisConsumerGroup: "gopherqueue-workers",
+		WorkerCount: 4, WorkerPollInterval: 100 * time.Millisecond, OutboxPollInterval: time.Second, OutboxBatchSize: 50, PendingIdleTimeout: 30 * time.Second,
+		PriorityHighWeight: 5, PriorityMediumWeight: 3, PriorityLowWeight: 1,
 		MaxJobAttempts: 3, JobTimeout: 30 * time.Second, ShutdownTimeout: 15 * time.Second,
 		RequestBodyLimit: 1 << 20, RateLimitPerMinute: 120,
 	}
@@ -31,6 +41,8 @@ func Load() (Config, error) {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
 	c.HTTPPort = envString("HTTP_PORT", c.HTTPPort)
+	c.RedisURL = envString("REDIS_URL", c.RedisURL)
+	c.RedisConsumerGroup = envString("REDIS_CONSUMER_GROUP", c.RedisConsumerGroup)
 	var err error
 	if c.WorkerCount, err = envInt("WORKER_COUNT", c.WorkerCount); err != nil {
 		return Config{}, err
@@ -41,10 +53,28 @@ func Load() (Config, error) {
 	if c.RateLimitPerMinute, err = envInt("RATE_LIMIT_PER_MINUTE", c.RateLimitPerMinute); err != nil {
 		return Config{}, err
 	}
+	if c.OutboxBatchSize, err = envInt("OUTBOX_BATCH_SIZE", c.OutboxBatchSize); err != nil {
+		return Config{}, err
+	}
+	if c.PriorityHighWeight, err = envInt("PRIORITY_HIGH_WEIGHT", c.PriorityHighWeight); err != nil {
+		return Config{}, err
+	}
+	if c.PriorityMediumWeight, err = envInt("PRIORITY_MEDIUM_WEIGHT", c.PriorityMediumWeight); err != nil {
+		return Config{}, err
+	}
+	if c.PriorityLowWeight, err = envInt("PRIORITY_LOW_WEIGHT", c.PriorityLowWeight); err != nil {
+		return Config{}, err
+	}
 	if c.RequestBodyLimit, err = envInt64("REQUEST_BODY_LIMIT", c.RequestBodyLimit); err != nil {
 		return Config{}, err
 	}
 	if c.WorkerPollInterval, err = envDuration("WORKER_POLL_INTERVAL", c.WorkerPollInterval); err != nil {
+		return Config{}, err
+	}
+	if c.OutboxPollInterval, err = envDuration("OUTBOX_POLL_INTERVAL", c.OutboxPollInterval); err != nil {
+		return Config{}, err
+	}
+	if c.PendingIdleTimeout, err = envDuration("PENDING_IDLE_TIMEOUT", c.PendingIdleTimeout); err != nil {
 		return Config{}, err
 	}
 	if c.JobTimeout, err = envDuration("JOB_TIMEOUT", c.JobTimeout); err != nil {
@@ -53,7 +83,10 @@ func Load() (Config, error) {
 	if c.ShutdownTimeout, err = envDuration("SHUTDOWN_TIMEOUT", c.ShutdownTimeout); err != nil {
 		return Config{}, err
 	}
-	if c.WorkerCount < 1 || c.MaxJobAttempts < 1 || c.RequestBodyLimit < 1 || c.RateLimitPerMinute < 1 {
+	if c.RedisURL == "" || c.RedisConsumerGroup == "" {
+		return Config{}, errors.New("REDIS_URL and REDIS_CONSUMER_GROUP must not be empty")
+	}
+	if c.WorkerCount < 1 || c.MaxJobAttempts < 1 || c.RequestBodyLimit < 1 || c.RateLimitPerMinute < 1 || c.OutboxBatchSize < 1 || c.PriorityHighWeight < 1 || c.PriorityMediumWeight < 1 || c.PriorityLowWeight < 1 {
 		return Config{}, errors.New("numeric configuration values must be positive")
 	}
 	return c, nil
