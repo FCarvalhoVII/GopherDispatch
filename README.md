@@ -1,149 +1,126 @@
-# GopherDispatch
+# GopherQueue
 
-GopherDispatch is a Go backend for creating and asynchronously processing jobs. It is designed as a production-minded exercise in concurrency and distributed systems, not a CRUD application. This release implements **v0.1 — Foundation**: an HTTP API, PostgreSQL persistence, a concurrent worker pool, simulated handlers, basic HTTP safeguards, graceful shutdown, and tests.
-
-> Current status: v0.1. Redis, weighted scheduling, retry backoff, idempotency, metrics, and tracing are part of the target design, but are intentionally deferred to later versions to keep the evolution verifiable.
+GopherQueue is a Go backend for durable, asynchronous job processing. **v0.2 — Queue & Worker Pool** adds Redis Streams, priority-aware scheduling, a PostgreSQL transactional outbox, and bounded concurrent workers while retaining PostgreSQL as the authoritative job store.
 
 ## Architecture
 
-```text
-Client
-  |
-  v
-+---------+       +----------------+
-| Go API  | ----> | PostgreSQL     |
-+---------+       | durable jobs   |
-                  +-------+--------+
-                          | atomic claim
-                          v
-                  +----------------+
-                  | Worker Pool    |
-                  | N goroutines   |
-                  +-------+--------+
-                          |
-                          v
-                  Handler registry
+```mermaid
+flowchart LR
+  C[Client] --> A[HTTP API]
+  A -->|one PostgreSQL transaction| P[(PostgreSQL jobs)]
+  A -->|same transaction| O[(job_outbox)]
+  O --> OP[Outbox publisher]
+  OP --> RH[Redis Stream: high]
+  OP --> RM[Redis Stream: medium]
+  OP --> RL[Redis Stream: low]
+  RH & RM & RL --> S[Weighted scheduler]
+  S --> W[Concurrent worker pool]
+  W -->|conditional execution claim| P
+  W --> H[Handler]
+  H -->|terminal state persisted| P
+  W -->|XACK after persistence| RH & RM & RL
 ```
 
-```text
-cmd/api/                       API composition root
-cmd/worker/                    worker composition root
-internal/config/               environment configuration
-internal/httpapi/              routes and middleware
-internal/job/                  domain, service, and repository contract
-internal/storage/postgres/     PostgreSQL implementation
-internal/worker/               pool and handlers
-migrations/                    SQL migrations
-docs/adr/                      architecture decision records
-```
-
-Interfaces exist only at boundaries with concrete reasons to vary: persistence and handlers. Composition remains explicit in both binaries.
-
-## Flows
-
-Creation: the client sends `POST /jobs`; the API limits and decodes the body, validates type, priority, and payload, and stores the job as `pending`.
-
-Processing: each goroutine requests a job. A single SQL statement uses `FOR UPDATE SKIP LOCKED` and changes the state to `processing`, eliminating the gap between selecting and reserving a job. The registry selects a handler by type, a timeout context wraps execution, and the job becomes `completed` or `failed`.
-
-Lookup: `GET /jobs/{id}` reads the durable source of truth in PostgreSQL.
+The API and worker are independent processes. The API writes a job and an outbox event atomically; its background publisher converts outbox entries into small Redis messages containing only `job_id` and priority. Workers load the durable job after receiving a stream message.
 
 ## Running locally
-
-Requirements: Docker with Compose. The image uses Go 1.27, the current stable release selected for this project.
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-PostgreSQL applies the first migration when its volume is created. If a migration changes during development, deliberately recreate the volume with `docker compose down -v` — this deletes local data.
-
-Check the services:
+The Compose stack starts `api`, `worker`, PostgreSQL, and Redis. PostgreSQL initialization applies all migrations only to a new volume. To deliberately reset local data after changing migrations:
 
 ```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/ready
+docker compose down -v
+docker compose up --build
 ```
 
-Create and retrieve a job:
+Create a job:
 
 ```bash
 curl -i -X POST http://localhost:8080/jobs \
   -H 'Content-Type: application/json' \
-  -d '{"type":"send-email","priority":"high","payload":{"email":"john@example.com","template":"welcome"}}'
-
-curl http://localhost:8080/jobs/JOB_ID
+  -d '{"type":"send-email","priority":"high","payload":{"email":"john@example.com"}}'
 ```
 
-Registered simulated types are `send-email`, `generate-report`, and `webhook-delivery`.
+Then retrieve it with `GET /jobs/{id}`. Supported simulated handlers are `send-email`, `generate-report`, and `webhook-delivery`.
+
+## Queueing, priorities, and concurrency
+
+Each priority has its own Redis Stream:
+
+- `gopherqueue:jobs:high`
+- `gopherqueue:jobs:medium`
+- `gopherqueue:jobs:low`
+
+Workers join the configured Redis Consumer Group. A mutex-protected deterministic cycle allocates reads with default weights `high=5`, `medium=3`, and `low=1`. An empty stream returns immediately, so it does not hold capacity while another priority has work. Weights express consumption opportunities, not a strict global execution order across concurrent workers.
+
+`WORKER_COUNT` bounds active handler execution. Every worker has a unique consumer identity derived from container hostname, process ID, and worker number, so scaled worker containers do not share a Redis consumer name.
+
+## PostgreSQL and Redis consistency
+
+Job creation inserts `jobs` and `job_outbox` in one PostgreSQL transaction. If Redis is unavailable after that commit, the unpublished event remains durable and the publisher retries it on later polls. Multiple publishers safely claim events with `FOR UPDATE SKIP LOCKED`.
+
+Redis publication and marking an event published cannot be atomic together. A publisher crash after `XADD` and before marking the outbox event may publish the same job twice. This is intentional at-least-once behavior: workers make a conditional PostgreSQL claim, and terminal duplicate deliveries are acknowledged without re-running the handler.
+
+## Claims, acknowledgment, and recovery
+
+Before invoking a handler, a worker atomically updates a job from `pending` to `processing`. It records `processing_owner` and `claimed_at`, creating a path to lease-based recovery in v0.5. Only the worker that wins this transition executes the handler.
+
+Messages are acknowledged only after PostgreSQL stores `completed` or `failed`. A database failure leaves the Redis message pending. An ACK failure may cause a harmless duplicate delivery; a terminal job is acknowledged without executing again.
+
+At startup, workers use `XAUTOCLAIM` for messages idle longer than `PENDING_IDLE_TIMEOUT`. Recovery is deliberately conservative: if PostgreSQL says the job is still `processing`, the message remains pending and is not re-executed. This prevents concurrent duplicates, but a job stranded by a crashed worker is not automatically recovered until v0.5 introduces execution leases.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---:|---|
 | `DATABASE_URL` | required | PostgreSQL DSN |
-| `HTTP_PORT` | `8080` | API port |
-| `WORKER_COUNT` | `4` | consumer goroutines |
-| `WORKER_POLL_INTERVAL` | `500ms` | pause when no jobs are available |
-| `MAX_JOB_ATTEMPTS` | `3` | persisted value for the retry evolution |
-| `JOB_TIMEOUT` | `30s` | per-handler limit |
-| `SHUTDOWN_TIMEOUT` | `15s` | drain deadline |
-| `REQUEST_BODY_LIMIT` | `1048576` | maximum accepted API body in bytes |
-| `RATE_LIMIT_PER_MINUTE` | `120` | simple per-IP, per-instance limit |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
+| `REDIS_CONSUMER_GROUP` | `gopherqueue-workers` | stream consumer group |
+| `WORKER_COUNT` | `4` | maximum active worker goroutines |
+| `PRIORITY_HIGH_WEIGHT` | `5` | high-priority scheduling opportunities |
+| `PRIORITY_MEDIUM_WEIGHT` | `3` | medium-priority scheduling opportunities |
+| `PRIORITY_LOW_WEIGHT` | `1` | low-priority scheduling opportunities |
+| `WORKER_POLL_INTERVAL` | `100ms` | pause after an empty/erroring queue read |
+| `OUTBOX_POLL_INTERVAL` | `1s` | publisher retry interval |
+| `OUTBOX_BATCH_SIZE` | `50` | events claimed per publisher cycle |
+| `PENDING_IDLE_TIMEOUT` | `30s` | minimum idle time before pending recovery |
+| `JOB_TIMEOUT` | `30s` | per-handler timeout |
+| `SHUTDOWN_TIMEOUT` | `15s` | graceful-drain deadline |
 
-## Concurrency and delivery guarantee
+Existing HTTP controls, including `REQUEST_BODY_LIMIT` and `RATE_LIMIT_PER_MINUTE`, remain supported.
 
-The worker pool has one loop per goroutine and does not create a goroutine per job. Cancellation stops new claims; already claimed work drains until the job timeout or the global shutdown deadline. `SKIP LOCKED` permits concurrency across processes without an additional distributed lock.
+## Graceful shutdown
 
-The system targets **at-least-once** delivery. In v0.1, a crash after a claim can leave a job in `processing`; leases and recovery arrive in v0.5. Once recovery exists, a crash after an external side effect and before committing the job state can repeat the handler. Exactly-once would require a shared transaction across PostgreSQL and every external side effect, which is generally unavailable. Real handlers must therefore be idempotent.
+The API stops accepting HTTP traffic and cancels its publisher. Workers stop new stream reads when signaled, allow already claimed handlers to use their bounded job context, persist terminal results, and ACK only finalized messages. Unfinished jobs remain pending in Redis and recoverable according to the conservative policy above.
 
-The `idempotency_key` column is reserved in the schema, but HTTP deduplication will only be enabled in v0.3. This version does not promise idempotency.
-
-## Priority, retry, and timeout
-
-In v0.1, SQL prefers `high`, then `medium`, then `low`, while keeping FIFO order within each class. Continuous high-priority load can cause starvation; this is a known limitation. v0.2 replaces this ordering with Redis queues and fair weighted scheduling.
-
-Automatic retries, exponential backoff, jitter, and a dead-letter queue will be implemented in v0.3. Today, a failure ends in `failed`. Per-job timeout already applies to the handler; handlers must honor their context.
-
-## Security and observability
-
-The API includes a request-body limit, strict JSON decoding, validation, server timeouts, panic recovery, and a simple local rate limit. Logs are JSON; worker events include `job_id`, type, priority, attempt, worker, and duration. Payloads and credentials are never logged.
-
-Prometheus and OpenTelemetry are planned for v0.4. The in-memory rate limiter is not a distributed defense; production should also enforce limits at the ingress or gateway.
-
-## Tests and quality
+## Testing
 
 ```bash
+make lint
 make test
 make test-race
 make benchmark
-make lint
 ```
 
-The integration test is opt-in and requires a migrated PostgreSQL instance:
+Unit tests cover the weighted cycle, outbox publication behavior, handler completion and ACK ordering, duplicate delivery behavior, configuration, and existing HTTP behavior. PostgreSQL integration tests remain opt-in:
 
 ```bash
 TEST_DATABASE_URL='postgres://gopherqueue:gopherqueue@localhost:5432/gopherqueue?sslmode=disable' \
 go test -tags=integration ./internal/storage/postgres
 ```
 
-CI runs formatting, `go vet`, regular tests, and the race detector. `BenchmarkSimulatedHandler` provides the initial benchmark infrastructure; the scheduler receives a dedicated benchmark in v0.2.
+## Known limitations
 
-## Trade-offs and current limitations
+- v0.2 provides at-least-once delivery, never exactly-once execution.
+- Job execution leases and automatic recovery of jobs stranded in `processing` are deferred to v0.5.
+- A publisher crash in the Redis-publication/Outbox-confirmation window can produce a duplicate stream message.
+- Handler failures become `failed`; retries, exponential backoff, jitter, DLQ, idempotency keys, and manual retry are v0.3 work.
+- Redis and PostgreSQL integration tests require locally available services.
 
-- PostgreSQL is both the queue and source of truth in v0.1: it reduces components and provides atomic claims, but polling costs queries and the current order is not fair.
-- There is no retry, DLQ, lease, or automatic recovery of abandoned jobs.
-- `Idempotency-Key` deduplication is not implemented yet.
-- PostgreSQL's entrypoint applies migrations only to new volumes; production should use a dedicated migration tool.
-- Prometheus metrics and OpenTelemetry tracing are not exposed yet.
-- Handlers only simulate work and do not produce external side effects.
+## ADRs
 
-## Roadmap
-
-- **v0.2 — Queue:** Redis, high/medium/low queues, a starvation-free weighted scheduler, and scheduler benchmarks.
-- **v0.3 — Reliability:** retries, deterministically tested jittered backoff, DLQ, and idempotency with a configurable window.
-- **v0.4 — Observability:** Prometheus metrics, queue depth, and OpenTelemetry traces between API and worker.
-- **v0.5 — Distributed Workers:** leases, heartbeat/recovery, and failure tests.
-- **v1.0:** hardening, load tests, releases, and open-source-ready documentation.
-
-Detailed decisions are available in [`docs/adr`](docs/adr/).
+Architecture decisions are documented in [`docs/adr`](docs/adr/), including delivery semantics, priority scheduling, Redis Streams, transactional outbox, locking, and worker concurrency.

@@ -1,17 +1,17 @@
-# ADR 0002: Priority scheduling
+# ADR 0002: Weighted priority scheduling
 
 ## Context
 
-Jobs have high, medium, and low priorities, but strict preference can cause starvation.
+High-priority work should receive more opportunities, but strict priority can indefinitely starve medium and low queues.
 
 ## Decision
 
-In the foundation, order jobs in PostgreSQL by priority and creation time. In v0.2, move consumption to three Redis queues and use configurable weighted cycles.
+Use a mutex-protected, deterministic weighted cycle. The defaults are high=5, medium=3, and low=1. Each worker asks the shared scheduler for its next stream before attempting a non-blocking Consumer Group read.
 
 ## Consequences
 
-v0.1 is simple but can starve lower-priority jobs under continuous load. The later weighted scheduler will retain preference while providing progress for lower-priority queues.
+Every nonempty priority receives recurring scheduling opportunities. Empty streams do not block other streams. Concurrent workers mean the exact global order is not guaranteed, but bounded scheduling opportunities are preserved.
 
-## Alternatives considered
+## Alternatives Considered
 
-A local heap does not coordinate multiple instances. Permanent strict priority was rejected as the final solution.
+Strict priority was rejected because it starves lower priorities. A local priority heap would not coordinate across worker processes.
